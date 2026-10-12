@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cosmo-scb"
+version = "0.1.0"
+description = "Visualize Scarabaeus (SCB) trajectories in NAIF Cosmographia"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["spiceypy>=5"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+cosmo-scb = "cosmo_scb.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]  # run from any environment with spiceypy, e.g. Scarabaeus
