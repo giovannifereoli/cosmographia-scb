@@ -11,5 +11,8 @@ venv/
 # Generated catalogs (cosmo-scb catalog writes to out/ by default)
 out/
 
+# Local examples built on private data
+examples/ema/
+
 # OS
 .DS_Store

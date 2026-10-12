@@ -19,20 +19,31 @@ The simplest option is the Scarabaeus environment, which makes `cosmo-scb`
 available next to SCB:
 
 ```sh
-../scarabaeus/.venv/bin/pip install -e ".[dev]"
+../scarabaeus/.venv/bin/python -m pip install -e ".[dev]"
 ```
+
+Call pip through `python -m pip`. That venv was created under another path,
+so its `bin/pip` and `bin/activate` still point there. Its `bin/python` and
+`bin/cosmo-scb` work when called by full path. In VS Code, select
+`../scarabaeus/.venv/bin/python` as the interpreter.
 
 Or use a standalone venv:
 
 ```sh
-python -m venv ~/.venvs/cosmo-scb
-~/.venvs/cosmo-scb/bin/pip install -e ".[dev]"
+python3 -m venv ~/.venvs/cosmo-scb
+~/.venvs/cosmo-scb/bin/python -m pip install -e ".[dev]"
 ```
 
 `python -m venv .venv` does not work inside this repo while its path contains
 a `:` (as in a OneDrive folder named `... (9-19-26 11:30 AM)`), because venv
-refuses paths that contain the PATH separator. The only dependency is
+refuses paths that contain the PATH separator. Keeping venvs outside OneDrive
+also stops it from syncing thousands of files. The only dependency is
 `spiceypy`.
+
+Scene scripts `import cosmoscripting`. It ships inside Cosmographia and needs
+its running window, so it cannot be installed with pip and the scripts do not
+run under a normal Python. Start them with `cosmo-scb open` (see
+[Opening scenes](#opening-scenes)).
 
 ## From Scarabaeus to Cosmographia
 
@@ -80,16 +91,54 @@ trajectory's `spk_path` and the SPICE kernel pool as they were. Inputs can mix
      models/           # spacecraft meshes, if any
    ```
 
-3. Open it in Cosmographia. Either use **File > Run Script...** and pick
-   `out/run/script.py`, which loads the catalog and frames the scene, or load
-   the catalog alone:
+3. Open it in Cosmographia:
 
    ```sh
-   ~/cosmographia-4.2/Cosmographia.app/Contents/MacOS/Cosmographia out/run/load.json
+   cosmo-scb open out/run
    ```
+
+   This runs `out/run/script.py`, which loads the catalog and frames the
+   scene. By hand: **File > Run Script...** and pick that file.
 
 The output folder is self-contained (unless you use `--link`), so you can move
 it or zip it.
+
+## Opening scenes
+
+`cosmo-scb open` starts Cosmographia on scene folders, `.py` scene scripts or
+`.json` catalogs:
+
+```sh
+cosmo-scb open out/run                      # the folder's script.py, else its load.json
+cosmo-scb open scenes/ct004_mro_orbits      # a bundled example scene
+cosmo-scb open out/run/load.json            # the catalog alone
+cosmo-scb open out/run --print              # print the command instead of running it
+```
+
+A script that does not load its own catalog gets the folder's `load.json`
+loaded first. Cosmographia is found from `--cosmographia PATH`, then
+`$COSMOGRAPHIA`, then `~/cosmographia-*/Cosmographia.app` (newest version
+first), `/Applications`, `~/Applications`, and finally the `PATH`. Either
+option can name the executable or the `.app` bundle.
+
+Cosmographia cannot load SPICE kernels from a folder whose path holds a
+non-ASCII character, such as the narrow no-break space macOS puts before "AM"
+in folder names like `OneDrive-UCB-O365 (9-19-26 11:30 AM)`. It reports
+`Error loading kernel` and skips every body. `cosmo-scb open` then opens the
+scene through a link in `~/.cache/cosmo-scb/scenes/`. **File > Run Script** on
+such a folder fails the same way, so use `cosmo-scb open` there.
+
+The same without `cosmo-scb`:
+
+```sh
+COSMO=~/cosmographia-4.2/Cosmographia.app/Contents/MacOS/Cosmographia
+$COSMO -p out/run/script.py     # run a scene script
+$COSMO out/run/load.json        # load a catalog
+```
+
+Cosmographia skips any catalog file that lacks `"version": "1.0"`, along with
+everything it requires, and gives no error. `cosmo-scb` writes the version.
+Hand-written catalogs need it too.
 
 ## Building a scene
 
@@ -233,18 +282,25 @@ cosmo.setCameraOrientation([qw, qx, qy, qz])
 
 ## Example scenes
 
-`scenes/` holds hand-written cosmoscripting scenes from earlier work:
+`scenes/` holds hand-written cosmoscripting scenes from the
+[cosmo-demos](https://github.com/NablaZeroLabs/cosmo-demos) tutorials,
+(C) 2021 Nabla Zero Labs (A. Gonzalez). Each folder has the tutorial's
+catalogs (`load.json`, `spice.json`, `spacecraft.json`) and SPKs. Its
+`script.py` loads `load.json` from its own folder, so the scene runs as is:
 
-| Scene | Objects it expects |
-| --- | --- |
-| `ct003_sun_synchronous_orbit` | `SSO Spacecraft` |
-| `ct004_mro_orbits` | `MRO`, Phobos, Deimos |
-| `ct005_geo_inertial` | `GEO Spacecraft` |
-| `ct006_iau_earth_orbits` | `Geosynchronous`, `Sun-Synchronous`, `Geostationary`, `Molniya` and their `... GT` ground tracks |
+```sh
+cosmo-scb open scenes/ct004_mro_orbits
+```
 
-Each script uses spacecraft from its own catalog and kernels, so load that
-catalog (**File > Open Catalog...**) before running the script. Those catalogs
-and kernels are not in this repo yet.
+| Scene | Tutorial | Shows |
+| --- | --- | --- |
+| `ct003_sun_synchronous_orbit` | `ct003_py_json_spice` | `SSO Spacecraft` in a sun-synchronous orbit, with the Earth-Sun direction |
+| `ct004_mro_orbits` | `ct004_set_camera_view` | `MRO` around Mars, with Phobos, Deimos and the Earth's orbit |
+| `ct005_geo_inertial` | `ct005_inertial_scene_from_scratch` | `GEO Spacecraft` from an Earth-centered inertial frame |
+| `ct006_iau_earth_orbits` | `ct006_iau_earth` | Geosynchronous, geostationary, Molniya and sun-synchronous orbits with ground tracks, in `IAU_EARTH` |
+
+cosmo-demos has no license file, so ask Nabla Zero Labs before you
+redistribute these files outside this repo.
 
 ## Layout
 
@@ -253,8 +309,9 @@ src/cosmo_scb/
   catalog.py   SPKs / Trajectories -> Cosmographia catalogs, sensors, script
   model.py     generic spacecraft mesh; copies user models with their files
   camera.py    Cosmographia state URL -> camera script lines
-  cli.py       `cosmo-scb catalog` / `cosmo-scb camera`
-scenes/        hand-written cosmoscripting scenes
+  launch.py    finds Cosmographia and starts it on a scene
+  cli.py       `cosmo-scb catalog` / `cosmo-scb open` / `cosmo-scb camera`
+scenes/        cosmo-demos scenes, each with its catalogs and kernels
 tests/         pytest suite (builds its own SPKs; needs no external kernels)
 ```
 

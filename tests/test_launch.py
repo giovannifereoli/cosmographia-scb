@@ -11,6 +11,12 @@ SCENES = sorted(p for p in (Path(__file__).parents[1] / "scenes").iterdir() if p
 SELF_LOADING = 'import os\ncosmo.loadCatalogFile(os.path.join(cosmo.scriptDir(), "load.json"))\n'
 
 
+@pytest.fixture(autouse=True)
+def links(tmp_path, monkeypatch):
+    monkeypatch.setattr("cosmo_scb.launch.LINK_DIR", tmp_path / "links")
+    return tmp_path / "links"
+
+
 @pytest.fixture
 def exe(tmp_path, monkeypatch):
     path = tmp_path / "bin" / "Cosmographia"
@@ -45,6 +51,18 @@ def test_catalog_goes_before_a_script_that_does_not_load_it(tmp_path, exe):
 def test_catalog_only_folder(tmp_path, exe):
     folder = scene(tmp_path / "s").resolve()
     assert scene_command(folder) == [str(exe), str(folder / "load.json")]
+
+
+def test_non_ascii_folder_opens_through_an_ascii_link(tmp_path, exe, links):
+    # macOS names OneDrive backups like "OneDrive (9-19-26 11:30\u202fAM)".
+    folder = scene(tmp_path / "11:30\u202fAM", SELF_LOADING)
+    command = scene_command(folder)
+    script = Path(command[-1])
+    assert command[:-1] == [str(exe), "-p"]
+    assert str(script).isascii() and script.parent.parent == links
+    assert script.samefile(folder / "script.py")
+    assert (script.parent / "load.json").is_file()
+    assert scene_command(folder) == command  # the link is reused
 
 
 def test_files_as_targets(tmp_path, exe):
@@ -124,4 +142,5 @@ def test_example_scene_is_complete(folder, exe):
     script = folder / "script.py"
     compile(script.read_text(), str(script), "exec")
     # The script loads its own catalog, so Cosmographia only needs -p.
-    assert scene_command(folder) == [str(exe), "-p", str(script.resolve())]
+    command = scene_command(folder)
+    assert command[:-1] == [str(exe), "-p"] and Path(command[-1]).samefile(script)

@@ -9,6 +9,7 @@ Catalog and File > Run Script do by hand.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -20,6 +21,10 @@ ENV_VAR = "COSMOGRAPHIA"
 
 #: Executable inside a macOS ``Cosmographia.app`` bundle.
 APP_EXECUTABLE = Path("Contents/MacOS/Cosmographia")
+
+#: Folder of ASCII-named links to scene folders whose path is not ASCII; see
+#: :func:`_ascii_path`.
+LINK_DIR = Path.home() / ".cache" / "cosmo-scb" / "scenes"
 
 
 def find_cosmographia(path=None) -> Path:
@@ -95,7 +100,9 @@ def scene_command(*targets, cosmographia=None) -> list[str]:
     -------
     list of str
         ``[executable, catalog, ..., "-p", script]`` with absolute paths; the
-        catalogs come first so the script sees their objects.
+        catalogs come first so the script sees their objects. A path that is
+        not ASCII is replaced by one through a link in :data:`LINK_DIR` (see
+        :func:`_ascii_path`).
 
     Raises
     ------
@@ -136,9 +143,10 @@ def scene_command(*targets, cosmographia=None) -> list[str]:
             "Cosmographia runs one script at a time; got "
             + ", ".join(str(s) for s in scripts) + "."
         )
-    command = [str(find_cosmographia(cosmographia)), *map(str, catalogs)]
+    command = [str(find_cosmographia(cosmographia))]
+    command += [str(_ascii_path(c)) for c in catalogs]
     if scripts:
-        command += ["-p", str(scripts[0])]
+        command += ["-p", str(_ascii_path(scripts[0]))]
     return command
 
 
@@ -224,3 +232,40 @@ def _loads_catalog(script: Path) -> bool:
         :func:`cosmo_scb.write_script` and those in ``scenes/`` do.
     """
     return "loadCatalogFile(" in script.read_text(errors="replace")
+
+
+def _ascii_path(path: Path) -> Path:
+    """Return an ASCII-only path to *path*, linking its folder if needed.
+
+    Cosmographia cannot load the SPICE kernels of a catalog whose path holds a
+    non-ASCII character, such as the narrow no-break space (U+202F) that macOS
+    puts before "AM" in folder names like ``OneDrive (9-19-26 11:30 AM)``: it
+    reports "Error loading kernel" and skips every body. Spaces and colons are
+    fine, and opening the catalog through a link with an ASCII path works.
+
+    Parameters
+    ----------
+    path : Path
+        Absolute, resolved path of a catalog or scene script.
+
+    Returns
+    -------
+    Path
+        *path* itself if it is ASCII; otherwise the same file through a link in
+        :data:`LINK_DIR` to its folder, or *path* if the link cannot be made.
+    """
+    if str(path).isascii():
+        return path
+    folder = path.parent
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", folder.name).strip("_") or "scene"
+    digest = hashlib.sha1(str(folder).encode()).hexdigest()[:8]
+    link = LINK_DIR / f"{name}-{digest}"
+    try:
+        if not (link.is_symlink() and link.resolve() == folder):
+            LINK_DIR.mkdir(parents=True, exist_ok=True)
+            if link.is_symlink():
+                link.unlink()
+            link.symlink_to(folder, target_is_directory=True)
+    except OSError:
+        return path
+    return link / path.name
