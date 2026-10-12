@@ -1,8 +1,9 @@
-"""Command line: ``cosmo-scb catalog ...`` and ``cosmo-scb camera ...``."""
+"""Command line: ``cosmo-scb catalog``, ``cosmo-scb open`` and ``cosmo-scb camera``."""
 
 from __future__ import annotations
 
 import argparse
+import shlex
 import sys
 from pathlib import Path
 
@@ -10,7 +11,24 @@ from .camera import camera_lines
 
 
 def _id_map(pairs, option):
-    """Parse ``ID=VALUE`` pairs into {int: str}."""
+    """Parse ``ID=VALUE`` options keyed by NAIF ID.
+
+    Parameters
+    ----------
+    pairs : list of str
+        Values of a repeatable option, e.g. ``["-60000=Orbiter"]``.
+    option : str
+        Option name, for error messages.
+
+    Returns
+    -------
+    dict[int, str]
+
+    Raises
+    ------
+    SystemExit
+        If a pair has no value or its key is not an integer.
+    """
     out = {}
     for pair in pairs:
         key, _, value = pair.partition("=")
@@ -21,7 +39,27 @@ def _id_map(pairs, option):
 
 
 def _obj_map(pairs, option, parse=str):
-    """Parse ``KEY=VALUE`` pairs, KEY a NAIF ID or an object name."""
+    """Parse ``KEY=VALUE`` options keyed by NAIF ID or object name.
+
+    Parameters
+    ----------
+    pairs : list of str
+        Values of a repeatable option, e.g. ``["Estimate=Truth"]``.
+    option : str
+        Option name, for error messages.
+    parse : callable
+        Converts each VALUE; a ValueError it raises becomes a SystemExit.
+
+    Returns
+    -------
+    dict[int | str, object]
+        Integer keys for NAIF IDs, string keys for names.
+
+    Raises
+    ------
+    SystemExit
+        If a pair lacks a key or a value, or *parse* rejects the value.
+    """
     out = {}
     for pair in pairs:
         key, _, value = pair.partition("=")
@@ -37,6 +75,24 @@ def _obj_map(pairs, option, parse=str):
 
 
 def _floats(text, counts):
+    """Parse comma-separated numbers.
+
+    Parameters
+    ----------
+    text : str
+        E.g. ``"1.5,2,3"``.
+    counts : tuple of int
+        Accepted numbers of values.
+
+    Returns
+    -------
+    list of float
+
+    Raises
+    ------
+    ValueError
+        If a value is not a number or their count is not in *counts*.
+    """
     values = [float(v) for v in text.split(",")]
     if len(values) not in counts:
         raise ValueError(f"expected {' or '.join(map(str, counts))} number(s)")
@@ -44,16 +100,61 @@ def _floats(text, counts):
 
 
 def _point(text):
+    """Parse a ``--point`` value.
+
+    Parameters
+    ----------
+    text : str
+        ``TARGET`` or ``TARGET,SECONDARY``.
+
+    Returns
+    -------
+    str or (str, str)
+        As :func:`cosmo_scb.write_catalogs` takes ``pointing`` values.
+    """
     target, _, secondary = text.partition(",")
     return (target, secondary) if secondary else target
 
 
 def _radius(text):
+    """Parse a ``--radius`` value.
+
+    Parameters
+    ----------
+    text : str
+        ``KM`` for a sphere or ``A,B,C`` for an ellipsoid.
+
+    Returns
+    -------
+    float or list of float
+
+    Raises
+    ------
+    ValueError
+        If there are not one or three numbers.
+    """
     radii = _floats(text, (1, 3))
     return radii[0] if len(radii) == 1 else radii
 
 
 def _model(text):
+    """Parse a ``--model`` value.
+
+    Parameters
+    ----------
+    text : str
+        ``default``, ``PATH`` or ``PATH@KM``.
+
+    Returns
+    -------
+    str or (str, float)
+        The model, with its size in km when given.
+
+    Raises
+    ------
+    ValueError
+        If the text after ``@`` is not a number.
+    """
     path, sep, size = text.rpartition("@")
     if not sep:
         return text
@@ -61,6 +162,23 @@ def _model(text):
 
 
 def _sensor(pair):
+    """Parse a ``--sensor`` value.
+
+    Parameters
+    ----------
+    pair : str
+        ``HOST=TARGET``, ``HOST=TARGET@H`` or ``HOST=TARGET@HxV``, angles in
+        degrees; HOST is a NAIF ID or a name.
+
+    Returns
+    -------
+    cosmo_scb.Sensor
+
+    Raises
+    ------
+    SystemExit
+        If the host, target or field of view is malformed.
+    """
     from .catalog import Sensor
 
     host, _, rest = pair.partition("=")
@@ -78,7 +196,19 @@ def _sensor(pair):
 
 
 def _spk_arg(text):
-    """``path[=label]``: split off a label unless the whole text is a file."""
+    """Parse an SPK argument.
+
+    Parameters
+    ----------
+    text : str
+        ``PATH`` or ``PATH=LABEL``. A file whose name contains ``=`` is taken
+        whole.
+
+    Returns
+    -------
+    (str, str or None)
+        The path and the label.
+    """
     path, sep, label = text.rpartition("=")
     if not sep or Path(text).exists():
         return (text, None)
@@ -86,6 +216,18 @@ def _spk_arg(text):
 
 
 def _catalog(args):
+    """Run ``cosmo-scb catalog``: write a catalog and its scene script.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed ``catalog`` options.
+
+    Raises
+    ------
+    SystemExit
+        If an input file is missing or the catalog cannot be built.
+    """
     from .catalog import write_catalogs, write_script
 
     spks = [_spk_arg(s) for s in args.spk]
@@ -120,11 +262,49 @@ def _catalog(args):
     except (ValueError, FileNotFoundError) as err:
         raise SystemExit(str(err))
     print(f"Wrote {load}")
-    print(f"  Cosmographia: File > Run Script > {out / 'script.py'}")
-    print(f"  or:           Cosmographia {load}")
+    print(f"  View it: cosmo-scb open {out}")
+    print(f"  or in Cosmographia: File > Run Script > {out / 'script.py'}")
+
+
+def _open(args):
+    """Run ``cosmo-scb open``: start Cosmographia on scenes or catalogs.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed ``open`` options.
+
+    Raises
+    ------
+    SystemExit
+        If a target or Cosmographia cannot be found, or Cosmographia fails to
+        start.
+    """
+    from .launch import open_scene, scene_command
+
+    try:
+        if args.print:
+            print(shlex.join(scene_command(*args.target, cosmographia=args.cosmographia)))
+            return
+        process = open_scene(*args.target, cosmographia=args.cosmographia)
+    except (ValueError, OSError) as err:
+        raise SystemExit(str(err))
+    print(f"Started {shlex.join(process.args)}")
 
 
 def _camera(args):
+    """Run ``cosmo-scb camera``: print camera script lines for a state URL.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed ``camera`` options.
+
+    Raises
+    ------
+    SystemExit
+        If the URL lacks camera parameters.
+    """
     try:
         for line in camera_lines(args.url):
             print(line)
@@ -133,6 +313,18 @@ def _camera(args):
 
 
 def main(argv=None):
+    """Entry point of the ``cosmo-scb`` command.
+
+    Parameters
+    ----------
+    argv : list of str, optional
+        Arguments without the program name (default: ``sys.argv[1:]``).
+
+    Raises
+    ------
+    SystemExit
+        On bad arguments or a failed command, with the message to show.
+    """
     parser = argparse.ArgumentParser(prog="cosmo-scb", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -228,6 +420,23 @@ def main(argv=None):
         "--distance", type=float, metavar="KM", help="script camera distance from the focus"
     )
     cat.set_defaults(func=_catalog)
+
+    opn = sub.add_parser(
+        "open",
+        help="start Cosmographia on a scene folder, script or catalog",
+        description="Start Cosmographia on scene folders (their script.py, or "
+        "load.json if there is no script), .py scene scripts or .json catalogs. "
+        "Cosmographia is found from --cosmographia, $COSMOGRAPHIA, "
+        "~/cosmographia-*/Cosmographia.app, /Applications or the PATH.",
+    )
+    opn.add_argument("target", nargs="+", help="scene folder, script.py or catalog .json")
+    opn.add_argument(
+        "--cosmographia", metavar="PATH", help="Cosmographia executable or Cosmographia.app"
+    )
+    opn.add_argument(
+        "--print", action="store_true", help="print the command instead of running it"
+    )
+    opn.set_defaults(func=_open)
 
     cam = sub.add_parser(
         "camera",

@@ -54,6 +54,7 @@ COSMO_NAMES = {0: "Solar System Barycenter", 9: "Pluto System Barycenter"}
 #: Renumbered targets get IDs counting down from here.
 FIRST_FREE_ID = -99_000_001
 
+#: Trajectory and label colors (r, g, b), cycled through the objects.
 PALETTE = (
     (1.0, 0.6, 0.0),
     (0.2, 0.8, 1.0),
@@ -72,7 +73,19 @@ _EDGE = 1e-3
 
 @dataclass(frozen=True)
 class Segment:
-    """Summary of one SPK segment (times in TDB seconds past J2000)."""
+    """Summary of one SPK segment.
+
+    Attributes
+    ----------
+    target : int
+        NAIF ID of the body whose states the segment holds.
+    center : int
+        NAIF ID of the body those states are relative to.
+    frame : int
+        SPICE ID of the reference frame of the states.
+    et0, et1 : float
+        Start and end of the coverage, TDB seconds past J2000.
+    """
 
     target: int
     center: int
@@ -122,15 +135,45 @@ class Sensor:
 
 @dataclass
 class _Item:
-    target: int  # NAIF ID in the catalog's kernels
+    """One object of the catalog being built.
+
+    Attributes
+    ----------
+    target : int
+        NAIF ID in the catalog's kernels; differs from *source* when the
+        object was renumbered.
+    name : str
+        Cosmographia name.
+    source : int
+        NAIF ID in the input files.
+    segments : list of Segment
+        The object's SPK segments, with output IDs.
+    files : list of str
+        Inputs the object comes from, quoted in its description.
+    """
+
+    target: int
     name: str
-    source: int  # NAIF ID in the input files
+    source: int
     segments: list[Segment] = field(default_factory=list)
     files: list[str] = field(default_factory=list)
 
 
 def spk_segments(path) -> list[Segment]:
-    """Read the segment summaries of an SPK; no kernels need to be loaded."""
+    """Read the segment summaries of an SPK file.
+
+    The file is read directly, so no kernel needs to be loaded.
+
+    Parameters
+    ----------
+    path : path
+        SPK file.
+
+    Returns
+    -------
+    list of Segment
+        One per segment, in file order.
+    """
     handle = sp.dafopr(str(path))
     try:
         sp.dafbfs(handle)
@@ -144,7 +187,22 @@ def spk_segments(path) -> list[Segment]:
 
 
 def merge_arcs(segments) -> list[Segment]:
-    """Merge one target's segments into time-ordered arcs of constant center."""
+    """Merge one target's segments into time-ordered arcs of constant center.
+
+    Overlapping or abutting segments with the same center are joined, a
+    segment ending before the current arc does is dropped, and a segment that
+    overlaps an arc with another center starts where that arc ends.
+
+    Parameters
+    ----------
+    segments : iterable of Segment
+        Segments of a single target.
+
+    Returns
+    -------
+    list of Segment
+        Non-overlapping arcs sorted by start time.
+    """
     arcs = []
     for seg in sorted(segments, key=lambda s: s.et0):
         if arcs and seg.et1 <= arcs[-1].et1:
@@ -218,11 +276,30 @@ def write_catalogs(
         Symlink input kernels instead of copying them (renumbered and
         temporary SPKs are always copied).
     script : bool
-        Also write ``script.py``, a scene that loads and shows the catalog.
+        Also write ``script.py``, a scene that loads and shows the catalog
+        (see :func:`write_script`).
 
     Returns
     -------
-    Path to ``load.json``.
+    Path
+        The ``load.json`` to open in Cosmographia.
+
+    Raises
+    ------
+    ValueError
+        If no SPK is given, an option names an object that is not in the
+        catalog, an object gets both ``body_frames`` and ``pointing`` (or
+        ``radii`` and ``models``), or centers/pointing refer to each other in
+        a circle.
+    FileNotFoundError
+        If a model is missing, or no leapseconds kernel is loaded and *lsk*
+        does not exist.
+
+    Warns
+    -----
+    UserWarning
+        If SPICE cannot place an object with the catalog's kernels (e.g. a
+        planetary SPK is missing), or an SPK uses a frame no kernel defines.
     """
     out_dir = Path(out_dir)
     kernel_dir = out_dir / "kernels"
@@ -342,7 +419,9 @@ def write_catalogs(
         {"version": "1.0", "name": title, "items": catalog_items},
     )
     load = out_dir / "load.json"
-    _write_json(load, {"require": ["spice.json", "spacecraft.json"]})
+    # Cosmographia ignores a catalog file without "version": "1.0".
+    _write_json(load, {"version": "1.0", "name": title,
+                       "require": ["spice.json", "spacecraft.json"]})
 
     if script and catalog_items:
         write_script(out_dir)
@@ -352,8 +431,13 @@ def write_catalogs(
 def write_script(out_dir, focus=None, distance=None, time=None, rate=None) -> Path:
     """Write ``script.py``: load the catalog in *out_dir* and frame a view.
 
+    The script loads ``load.json`` from its own folder, shows every object
+    and trajectory, centers the camera on *focus* and plays the catalog.
+
     Parameters
     ----------
+    out_dir : path
+        Folder holding a catalog written by :func:`write_catalogs`.
     focus : str
         Object to center and select (default: the first spacecraft's center).
     distance : float
@@ -362,6 +446,17 @@ def write_script(out_dir, focus=None, distance=None, time=None, rate=None) -> Pa
         Start time, e.g. "2030-06-13 12:00:00 UTC" (default: catalog start).
     rate : float
         Simulated seconds per second (default: the catalog plays in ~1 min).
+
+    Returns
+    -------
+    Path
+        The script, to run in Cosmographia (File > Run Script) or with
+        ``cosmo-scb open <out_dir>``.
+
+    Raises
+    ------
+    ValueError
+        If ``spacecraft.json`` has no objects.
     """
     out_dir = Path(out_dir)
     items = json.loads((out_dir / "spacecraft.json").read_text())["items"]
@@ -397,7 +492,25 @@ def write_script(out_dir, focus=None, distance=None, time=None, rate=None) -> Pa
 
 
 def _spk_input(spec, k, tmp: Path):
-    """Return (path, label, temporary) for one entry of ``spks``."""
+    """Resolve one entry of ``spks`` to an SPK file.
+
+    A Scarabaeus ``Trajectory`` that has no SPK on disk is written to a
+    temporary file, leaving the Trajectory and the kernel pool as they were.
+
+    Parameters
+    ----------
+    spec : path, Trajectory, or (either, label)
+        The entry.
+    k : int
+        Its position in ``spks``, naming its temporary folder.
+    tmp : Path
+        Temporary folder for SPKs written from Trajectory objects.
+
+    Returns
+    -------
+    (Path, str or None, bool)
+        The SPK, its label, and whether the SPK is temporary.
+    """
     if isinstance(spec, (str, os.PathLike)) or hasattr(spec, "write_to_spk"):
         source, label = spec, None
     else:
@@ -426,7 +539,29 @@ def _spk_input(spec, k, tmp: Path):
 
 
 def _collect(inputs, names, keep_natural):
-    """Create one item per target, renumbering targets whose coverage would be shadowed."""
+    """Create one item per SPK target, renumbering shadowed targets.
+
+    A target whose segments overlap in time with the same target from an
+    earlier input gets a free NAIF ID (counting down from FIRST_FREE_ID),
+    since SPICE would otherwise serve only the last kernel loaded.
+
+    Parameters
+    ----------
+    inputs : list of (Path, str or None, bool)
+        Entries from :func:`_spk_input`.
+    names : dict[int, str]
+        User names by NAIF ID.
+    keep_natural : bool
+        Also make items for natural bodies (IDs 0-999).
+
+    Returns
+    -------
+    items : dict[int, _Item]
+        Items by output NAIF ID, in input order, with unique names.
+    copies : list of (Path, dict[int, int], bool)
+        Each input with its renumbering (input ID -> output ID) and whether it
+        is temporary.
+    """
     per_file = [spk_segments(path) for path, _, _ in inputs]
     taken = {i for segs in per_file for s in segs for i in (s.target, s.center)}
     coverage: dict[int, list[Segment]] = {}
@@ -481,13 +616,45 @@ def _collect(inputs, names, keep_natural):
 
 
 def _key(key):
-    """Object key: an int NAIF ID (digit strings too) or a display name."""
+    """Normalize an object key.
+
+    Parameters
+    ----------
+    key : int or str
+        NAIF ID, digit string, or display name.
+
+    Returns
+    -------
+    int or str
+        An int for IDs and digit strings, else the name.
+    """
     if isinstance(key, str):
         return int(key) if key.strip().lstrip("-").isdigit() else key
     return int(key)
 
 
 def _match(key, items, what) -> list[_Item]:
+    """Find the items an option key selects.
+
+    Parameters
+    ----------
+    key : int or str
+        NAIF ID, which selects every item with that input or output ID, or a
+        display name, which selects one item.
+    items : dict[int, _Item]
+        Catalog items.
+    what : str
+        Option name, for error messages.
+
+    Returns
+    -------
+    list of _Item
+
+    Raises
+    ------
+    ValueError
+        If no item matches.
+    """
     key = _key(key)
     if isinstance(key, int):
         hits = [i for i in items.values() if key in (i.source, i.target)]
@@ -500,7 +667,28 @@ def _match(key, items, what) -> list[_Item]:
 
 
 def _per_item(option, items, what) -> dict:
-    """Spread an option keyed by NAIF ID or name onto output IDs; names win."""
+    """Spread an option keyed by NAIF ID or name onto output IDs.
+
+    Parameters
+    ----------
+    option : dict or None
+        Values keyed by NAIF ID or display name.
+    items : dict[int, _Item]
+        Catalog items.
+    what : str
+        Option name, for error messages.
+
+    Returns
+    -------
+    dict[int, object]
+        Values by output NAIF ID. A value given by name wins over one given
+        by ID for the same item.
+
+    Raises
+    ------
+    ValueError
+        If a key matches no item.
+    """
     keyed = [(_key(k), v) for k, v in (option or {}).items()]
     out = {}
     for key, value in sorted(keyed, key=lambda kv: isinstance(kv[0], str)):
@@ -510,7 +698,26 @@ def _per_item(option, items, what) -> dict:
 
 
 def _ref(body, items):
-    """(Cosmographia name, SPICE name, item or None) of a body given as ID or name."""
+    """Resolve a body that a center, pointing or sensor option refers to.
+
+    Parameters
+    ----------
+    body : int or str
+        NAIF ID or name. A name that is not in the catalog is passed to
+        Cosmographia and SPICE as is (e.g. "Sun").
+    items : dict[int, _Item]
+        Catalog items.
+
+    Returns
+    -------
+    (str, str, _Item or None)
+        Cosmographia name, SPICE name, and the catalog item if the body is one.
+
+    Raises
+    ------
+    ValueError
+        If a NAIF ID matches several catalog items.
+    """
     key = _key(body)
     if isinstance(key, str):
         for item in items.values():
@@ -531,10 +738,28 @@ def _ref(body, items):
 
 
 def _dependency_order(items, deps) -> list[_Item]:
-    """Order items so each comes after the catalog items it refers to."""
+    """Order items so each comes after the catalog items it refers to.
+
+    Parameters
+    ----------
+    items : list of _Item
+        Items in their preferred order, kept where references allow.
+    deps : dict[int, list of _Item]
+        Items each output NAIF ID refers to as center or pointing target.
+
+    Returns
+    -------
+    list of _Item
+
+    Raises
+    ------
+    ValueError
+        If the references form a cycle.
+    """
     ordered, state = [], {}
 
     def visit(item):
+        """Append *item* after the items it depends on (depth first)."""
         if state.get(item.target) == "done":
             return
         if state.get(item.target) == "visiting":
@@ -552,7 +777,18 @@ def _dependency_order(items, deps) -> list[_Item]:
 
 
 def _two_vector(observer, target, secondary) -> dict:
-    """Frame with +Z toward *target* and +X toward *secondary*."""
+    """Cosmographia TwoVector frame: +Z toward *target*, +X toward *secondary*.
+
+    Parameters
+    ----------
+    observer, target, secondary : str
+        Cosmographia names of the object and the two bodies.
+
+    Returns
+    -------
+    dict
+        ``bodyFrame`` definition.
+    """
     return {
         "type": "TwoVector",
         "primaryAxis": "z",
@@ -563,6 +799,23 @@ def _two_vector(observer, target, secondary) -> dict:
 
 
 def _globe(radii) -> dict:
+    """Cosmographia Globe geometry.
+
+    Parameters
+    ----------
+    radii : float or sequence of 3 floats
+        Sphere radius, or ellipsoid radii, in km.
+
+    Returns
+    -------
+    dict
+        ``geometry`` definition.
+
+    Raises
+    ------
+    ValueError
+        If a sequence does not hold three radii.
+    """
     if isinstance(radii, (int, float)):
         return {"type": "Globe", "radius": float(radii)}
     radii = [float(r) for r in radii]
@@ -572,6 +825,31 @@ def _globe(radii) -> dict:
 
 
 def _mesh(spec, out_dir: Path, used: set[str]) -> dict:
+    """Cosmographia Mesh geometry, with its model copied under *out_dir*.
+
+    Parameters
+    ----------
+    spec : str, path, (path, float) or dict
+        "default", a model file, a model file with its size in km, or Mesh
+        fields with ``source`` a local path; see ``models`` in
+        :func:`write_catalogs`.
+    out_dir : Path
+        Catalog folder; models go to its ``models/``.
+    used : set of str
+        Model folder names taken so far; updated.
+
+    Returns
+    -------
+    dict
+        ``geometry`` definition, ``source`` relative to *out_dir*.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the model does not exist.
+    ValueError
+        If the model references files outside its folder.
+    """
     if isinstance(spec, dict):
         geometry = {"type": "Mesh", "size": DEFAULT_SIZE, **spec}
     elif isinstance(spec, (tuple, list)):
@@ -588,6 +866,36 @@ def _mesh(spec, out_dir: Path, used: set[str]) -> dict:
 
 
 def _sensor_items(sensor, items, spice_name, aim, entries) -> list[dict]:
+    """Catalog entries for one Sensor, one per host item.
+
+    The frustum hangs on its host and points at the target through a
+    TwoVector frame, or uses the host's body frame when the host already
+    points at that target or the sensor has an explicit orientation.
+
+    Parameters
+    ----------
+    sensor : Sensor
+        The sensor.
+    items : dict[int, _Item]
+        Catalog items.
+    spice_name : dict[int, str]
+        SPICE name per output NAIF ID.
+    aim : dict[int, str]
+        Pointing target per output NAIF ID, from ``pointing``.
+    entries : dict[str, dict]
+        Catalog entries by name, giving each host's time span.
+
+    Returns
+    -------
+    list of dict
+        ``sensor`` entries.
+
+    Raises
+    ------
+    ValueError
+        If the host is not in the catalog, or the shape or field of view is
+        invalid.
+    """
     hosts = _match(sensor.host, items, "Sensor host")
     target, target_spice, _ = _ref(sensor.target, items)
     if isinstance(sensor.fov, (int, float)):
@@ -646,6 +954,18 @@ def _frustum_angle(angle: float, shape: str) -> float:
 
     Cosmographia 4.2 puts the edges of a rectangular frustum at tan(a/2)/2
     from the boresight instead of tan(a/2); elliptical ones are correct.
+
+    Parameters
+    ----------
+    angle : float
+        Full angle wanted on screen, degrees.
+    shape : str
+        "rectangular" or "elliptical".
+
+    Returns
+    -------
+    float
+        Full angle to write in the catalog, degrees.
     """
     if shape == "elliptical":
         return angle
@@ -653,7 +973,24 @@ def _frustum_angle(angle: float, shape: str) -> float:
 
 
 def _auto_range(host: _Item, host_spice: str, target_spice: str) -> float:
-    """1.02 x the farthest host-target distance over the host's coverage."""
+    """Sensor range: 1.02 x the farthest host-target distance.
+
+    The distance is sampled 200 times per arc of the host's coverage, with
+    the catalog's kernels loaded.
+
+    Parameters
+    ----------
+    host : _Item
+        Sensor host.
+    host_spice, target_spice : str
+        SPICE names of the host and the target.
+
+    Returns
+    -------
+    float
+        Range in km to 4 significant digits, or FALLBACK_RANGE, with a
+        warning, when SPICE cannot compute the distance.
+    """
     ets = [
         a.et0 + _EDGE + (a.et1 - a.et0 - 2 * _EDGE) * k / 199
         for a in merge_arcs(host.segments)
@@ -674,7 +1011,14 @@ def _auto_range(host: _Item, host_spice: str, target_spice: str) -> float:
 
 
 def _check_resolves(entry: dict) -> None:
-    """Warn if SPICE cannot place an item the way Cosmographia will ask."""
+    """Warn if SPICE cannot place an item the way Cosmographia will ask.
+
+    Parameters
+    ----------
+    entry : dict
+        Catalog entry. Each of its arcs is evaluated at its start and end,
+        with the catalog's kernels loaded.
+    """
     for block in entry.get("arcs", [entry]):
         trajectory = block["trajectory"]
         start = sp.str2et(block.get("startTime", entry["startTime"]))
@@ -693,10 +1037,32 @@ def _check_resolves(entry: dict) -> None:
 
 
 def _is_natural(code: int) -> bool:
+    """Tell whether *code* is a natural body: a barycenter, the Sun, a planet or a moon.
+
+    Parameters
+    ----------
+    code : int
+        NAIF ID.
+
+    Returns
+    -------
+    bool
+        True for IDs 0-999.
+    """
     return 0 <= code < 1000
 
 
 def _overlap(a: Segment, b: Segment) -> bool:
+    """Tell whether two segments share more than the 1 ms edge margin of time.
+
+    Parameters
+    ----------
+    a, b : Segment
+
+    Returns
+    -------
+    bool
+    """
     return a.et0 < b.et1 - _EDGE and b.et0 < a.et1 - _EDGE
 
 
@@ -705,6 +1071,16 @@ def _natural_name(code: int) -> str | None:
 
     SPICE's upper-case names are title-cased for natural bodies (EROS ->
     Eros) but kept for spacecraft, whose names are often acronyms (MRO).
+
+    Parameters
+    ----------
+    code : int
+        NAIF ID.
+
+    Returns
+    -------
+    str or None
+        Cosmographia name, or None if SPICE does not know the ID.
     """
     if code in COSMO_NAMES:
         return COSMO_NAMES[code]
@@ -723,10 +1099,21 @@ def _sidecar_names(spk: Path) -> dict[int, str]:
     ``<stem>_<BODY>_parameters.json`` record ``body_ID`` and the owner of
     each parameter. Sidecars belonging to another SPK whose name extends
     this stem (traj.bsp vs traj_est_it5.bsp) are skipped.
+
+    Parameters
+    ----------
+    spk : Path
+        SPK file written by Scarabaeus.
+
+    Returns
+    -------
+    dict[int, str]
+        Names by NAIF ID; empty if there are no readable sidecars.
     """
     names: dict[int, str] = {}
 
     def collect(node):
+        """Record every ``name``/``spice_id`` pair in a settings tree."""
         if isinstance(node, dict):
             code, name = node.get("spice_id"), node.get("name")
             if isinstance(code, (int, float)) and not isinstance(code, bool) and isinstance(name, str):
@@ -738,6 +1125,8 @@ def _sidecar_names(spk: Path) -> dict[int, str]:
                 collect(value)
 
     def owner(node, tag):
+        """Record each leg's ``body_ID``, named after the one body owning its
+        parameters, else after *tag*."""
         legs = node.get("legs")
         for leg in legs.values() if isinstance(legs, dict) else [node]:
             code = leg.get("body_ID") if isinstance(leg, dict) else None
@@ -773,6 +1162,13 @@ def _sidecar_names(spk: Path) -> dict[int, str]:
 
 
 def _dedupe_names(items) -> None:
+    """Make item names unique, appending " [<NAIF ID>]" to repeats.
+
+    Parameters
+    ----------
+    items : iterable of _Item
+        Renamed in place.
+    """
     seen: set[str] = set()
     for item in items:
         if item.name in seen:
@@ -781,6 +1177,21 @@ def _dedupe_names(items) -> None:
 
 
 def _unique(directory: Path, name: str, used: set[str]) -> Path:
+    """Reserve a file name in *directory*, adding _2, _3, ... if it is taken.
+
+    Parameters
+    ----------
+    directory : Path
+        Target folder.
+    name : str
+        Wanted file name.
+    used : set of str
+        Names taken so far; updated.
+
+    Returns
+    -------
+    Path
+    """
     path = directory / name
     k = 1
     while path.name in used:
@@ -791,7 +1202,22 @@ def _unique(directory: Path, name: str, used: set[str]) -> Path:
 
 
 def _install(src: Path, dest: Path, link: bool) -> None:
-    """Copy or symlink *src* to *dest*, never writing through an old link."""
+    """Copy or symlink *src* to *dest*, never writing through an old link.
+
+    Parameters
+    ----------
+    src : Path
+        Input kernel.
+    dest : Path
+        Its place in the catalog; an existing file or link there is replaced.
+    link : bool
+        Symlink instead of copying.
+
+    Raises
+    ------
+    ValueError
+        If *dest* already is *src*, i.e. the input sits in the output folder.
+    """
     if dest.is_symlink():
         dest.unlink()
     elif dest.exists():
@@ -805,7 +1231,15 @@ def _install(src: Path, dest: Path, link: bool) -> None:
 
 
 def _renumber_spk(path: Path, renumber: dict[int, int]) -> None:
-    """Rewrite target/center IDs in the segment descriptors of *path*."""
+    """Rewrite target and center IDs in the segment descriptors of an SPK.
+
+    Parameters
+    ----------
+    path : Path
+        SPK to modify in place (a copy, never an input).
+    renumber : dict[int, int]
+        Input ID -> output ID.
+    """
     handle = sp.dafopw(str(path))
     try:
         sp.dafbfs(handle)
@@ -820,6 +1254,18 @@ def _renumber_spk(path: Path, renumber: dict[int, int]) -> None:
 
 
 def _names_kernel(spice_name: dict[int, str]) -> str:
+    """Text kernel naming the catalog's objects for SPICE.
+
+    Parameters
+    ----------
+    spice_name : dict[int, str]
+        SPICE name per NAIF ID.
+
+    Returns
+    -------
+    str
+        ``NAIF_BODY_NAME``/``NAIF_BODY_CODE`` assignments.
+    """
     lines = ["KPL/FK", "", "Names for the objects in this Cosmographia catalog.", "", "\\begindata", ""]
     for code, name in spice_name.items():
         lines.append(f"   NAIF_BODY_NAME += ( '{name}' )")
@@ -830,7 +1276,24 @@ def _names_kernel(spice_name: dict[int, str]) -> str:
 
 @contextmanager
 def _furnished(kernels, lsk):
-    """Load the catalog's kernels (and a leapseconds kernel if none is loaded)."""
+    """Load the catalog's kernels, and a leapseconds kernel if none is loaded.
+
+    Parameters
+    ----------
+    kernels : iterable of path
+        Kernels to furnish; unloaded again on exit.
+    lsk : path or None
+        Leapseconds kernel (default: COSMO_LSK).
+
+    Yields
+    ------
+    None
+
+    Raises
+    ------
+    FileNotFoundError
+        If no leapseconds kernel is loaded and *lsk* does not exist.
+    """
     loaded = []
     try:
         for kernel in kernels:
@@ -851,20 +1314,65 @@ def _furnished(kernels, lsk):
 
 
 def _utc(et: float) -> str:
+    """Format an ephemeris time as a Cosmographia UTC string.
+
+    Parameters
+    ----------
+    et : float
+        TDB seconds past J2000.
+
+    Returns
+    -------
+    str
+        E.g. "2030-06-13 12:00:00.000 UTC".
+    """
     return sp.et2utc(et, "ISOC", 3).replace("T", " ") + " UTC"
 
 
 def _parse_utc(text: str) -> datetime:
+    """Parse a string written by :func:`_utc`.
+
+    Parameters
+    ----------
+    text : str
+
+    Returns
+    -------
+    datetime
+        Naive UTC time.
+    """
     return datetime.strptime(text.removesuffix(" UTC"), "%Y-%m-%d %H:%M:%S.%f")
 
 
 def _colors():
+    """Yield trajectory colors, cycling through PALETTE.
+
+    Yields
+    ------
+    list of float
+        (r, g, b), 0-1.
+    """
     while True:
         yield from (list(c) for c in PALETTE)
 
 
 def _center(code, items, spice_name):
-    """(Cosmographia name, SPICE name) of an SPK segment center."""
+    """Names of an SPK segment center.
+
+    Parameters
+    ----------
+    code : int
+        Output NAIF ID of the center.
+    items : dict[int, _Item]
+        Catalog items.
+    spice_name : dict[int, str]
+        SPICE name per output NAIF ID.
+
+    Returns
+    -------
+    (str, str)
+        Cosmographia name and SPICE name.
+    """
     if code in items:
         return items[code].name, spice_name[code]
     with sp.no_found_check():
@@ -873,11 +1381,36 @@ def _center(code, items, spice_name):
 
 
 def _catalog_item(item, items, spice_name, color, frame=None, center=None, geometry=None) -> dict:
-    """Catalog entry.
+    """Catalog entry for one item, with one arc per change of center.
 
-    *center* = (Cosmographia name, SPICE name, catalog item or None) replaces
-    the SPK centers; a catalog item as center also limits the entry to the
-    times that item covers.
+    Parameters
+    ----------
+    item : _Item
+        The object.
+    items : dict[int, _Item]
+        All catalog items.
+    spice_name : dict[int, str]
+        SPICE name per output NAIF ID.
+    color : list of float
+        Label and trajectory color (r, g, b).
+    frame : dict, optional
+        ``bodyFrame`` definition.
+    center : (str, str, _Item or None), optional
+        Cosmographia name, SPICE name and catalog item of a center that
+        replaces the SPK centers; a catalog item as center also limits the
+        entry to the times that item covers.
+    geometry : dict, optional
+        ``geometry`` definition.
+
+    Returns
+    -------
+    dict
+        The entry, with trajectory plot, label and description.
+
+    Raises
+    ------
+    ValueError
+        If the item and its *center* never overlap in time.
     """
     if center:
         arcs = merge_arcs([replace(s, center=0) for s in item.segments])
@@ -937,7 +1470,20 @@ def _catalog_item(item, items, spice_name, color, frame=None, center=None, geome
 
 
 def _clip(arcs, segments) -> list[Segment]:
-    """Cut *arcs* down to the times *segments* cover."""
+    """Cut *arcs* down to the times *segments* cover.
+
+    Parameters
+    ----------
+    arcs : list of Segment
+        Arcs to clip.
+    segments : list of Segment
+        Coverage to keep, whatever their centers.
+
+    Returns
+    -------
+    list of Segment
+        The pieces of *arcs* longer than the edge margins.
+    """
     cover = merge_arcs([replace(s, center=0) for s in segments])
     out = []
     for arc in arcs:
@@ -949,15 +1495,32 @@ def _clip(arcs, segments) -> list[Segment]:
 
 
 def _write_json(path: Path, data) -> None:
+    """Write *data* as indented JSON.
+
+    Parameters
+    ----------
+    path : Path
+    data : object
+        JSON-serializable.
+    """
     path.write_text(json.dumps(data, indent=2) + "\n")
 
 
 _SCRIPT = '''\
-"""Cosmographia scene for this catalog: File > Run Script, pick this file."""
+"""Cosmographia scene for this catalog.
+
+Run it in Cosmographia (File > Run Script) or with ``cosmo-scb open <folder>``.
+"""
 
 import os
 
-import cosmoscripting
+try:
+    import cosmoscripting
+except ImportError:
+    raise SystemExit(
+        "cosmoscripting ships with Cosmographia: run this script there "
+        "(File > Run Script) or with `cosmo-scb open <this folder>`."
+    ) from None
 
 cosmo = cosmoscripting.Cosmo()
 cosmo.loadCatalogFile(os.path.join(cosmo.scriptDir(), "load.json"))

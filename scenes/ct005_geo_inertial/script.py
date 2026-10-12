@@ -1,6 +1,24 @@
-import cosmoscripting
+"""Geostationary spacecraft seen from an Earth-centered inertial frame.
+
+From the ct005_inertial_scene_from_scratch tutorial of
+https://github.com/NablaZeroLabs/cosmo-demos, (C) 2021 Nabla Zero Labs (A. Gonzalez).
+The script loads ``load.json`` from its own folder, so it runs as is: in
+Cosmographia, File > Run Script, or
+``cosmo-scb open scenes/ct005_geo_inertial``.
+"""
+
+import os
+
+try:
+    import cosmoscripting
+except ImportError:
+    raise SystemExit(
+        "cosmoscripting ships with Cosmographia: run this script there "
+        "(File > Run Script) or with `cosmo-scb open <scene folder>`."
+    ) from None
 
 cosmo = cosmoscripting.Cosmo()
+cosmo.loadCatalogFile(os.path.join(cosmo.scriptDir(), "load.json"))
 bodies = ["Sun", "Earth", "Moon", "GEO Spacecraft"]
 
 ########################################

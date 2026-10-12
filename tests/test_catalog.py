@@ -18,7 +18,9 @@ def test_single_spk(tmp_path, lsk):
 
     load = write_catalogs(out, [spk], lsk=lsk)
 
-    assert read(out, "load.json") == {"require": ["spice.json", "spacecraft.json"]}
+    load_json = read(out, "load.json")
+    assert load_json["version"] == "1.0"  # Cosmographia skips catalogs without it
+    assert load_json["require"] == ["spice.json", "spacecraft.json"]
     assert read(out, "spice.json")["spiceKernels"] == [
         "kernels/names.tk", "kernels/truth_trajectory.bsp"
     ]

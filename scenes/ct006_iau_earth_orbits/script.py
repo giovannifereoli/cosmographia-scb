@@ -1,6 +1,25 @@
-import cosmoscripting
+"""Geosynchronous, geostationary, Molniya and sun-synchronous orbits with
+ground tracks, seen from the Earth body-fixed frame (IAU_EARTH).
+
+From the ct006_iau_earth tutorial of
+https://github.com/NablaZeroLabs/cosmo-demos, (C) 2021 Nabla Zero Labs (A. Gonzalez).
+The script loads ``load.json`` from its own folder, so it runs as is: in
+Cosmographia, File > Run Script, or
+``cosmo-scb open scenes/ct006_iau_earth_orbits``.
+"""
+
+import os
+
+try:
+    import cosmoscripting
+except ImportError:
+    raise SystemExit(
+        "cosmoscripting ships with Cosmographia: run this script there "
+        "(File > Run Script) or with `cosmo-scb open <scene folder>`."
+    ) from None
 
 cosmo = cosmoscripting.Cosmo()
+cosmo.loadCatalogFile(os.path.join(cosmo.scriptDir(), "load.json"))
 bodies = ["Sun", "Earth", "Moon"]
 bodies += ["Geosynchronous", "Sun-Synchronous"]
 bodies += ["Geostationary", "Molniya"]

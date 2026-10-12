@@ -10,12 +10,30 @@ Pasting the generated lines into a scene script reproduces that view.
 
 from __future__ import annotations
 
+#: URL parameters of the camera position, km in the view's frame.
 POSITION_KEYS = ("x", "y", "z")
+#: URL parameters of the camera orientation quaternion, scalar first.
 ORIENTATION_KEYS = ("qw", "qx", "qy", "qz")
 
 
 def parse_url(url: str) -> dict[str, str]:
-    """Return the query parameters of a Cosmographia URL as a dict."""
+    """Return the query parameters of a Cosmographia URL as a dict.
+
+    Parameters
+    ----------
+    url : str
+        State URL, e.g. ``cosmo:Sun?select=Sun&x=...&qw=...``.
+
+    Returns
+    -------
+    dict[str, str]
+        Parameter values as written in the URL.
+
+    Raises
+    ------
+    ValueError
+        If *url* is empty or lacks a camera position or orientation parameter.
+    """
     if not url or not url.strip():
         raise ValueError("Empty Cosmographia URL.")
 
@@ -33,7 +51,24 @@ def parse_url(url: str) -> dict[str, str]:
 
 
 def camera_lines(url: str) -> tuple[str, str]:
-    """Return the ``setCameraPosition`` and ``setCameraOrientation`` lines."""
+    """Return the ``setCameraPosition`` and ``setCameraOrientation`` lines.
+
+    Parameters
+    ----------
+    url : str
+        State URL from "Copy State URL to Clipboard".
+
+    Returns
+    -------
+    (str, str)
+        The two cosmoscripting calls, to paste into a scene script after the
+        camera frame is set.
+
+    Raises
+    ------
+    ValueError
+        As :func:`parse_url`.
+    """
     params = parse_url(url)
     position = ", ".join(params[k] for k in POSITION_KEYS)
     orientation = ", ".join(params[k] for k in ORIENTATION_KEYS)

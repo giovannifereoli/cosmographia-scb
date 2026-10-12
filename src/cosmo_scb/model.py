@@ -15,6 +15,7 @@ from pathlib import Path
 #: Default ``size`` of a mesh in km: half its largest extent (a 10 m span).
 DEFAULT_SIZE = 0.005
 
+#: File stem of the default model.
 DEFAULT_NAME = "scb_spacecraft"
 
 _MATERIALS = {
@@ -37,6 +38,16 @@ def write_default_model(directory) -> Path:
     The axes match the pointing frame of :func:`cosmo_scb.write_catalogs`:
     the camera looks along +Z, the solar wings extend along +/-Y with their
     cells facing +X (the Sun), and the high-gain antenna faces -Z.
+
+    Parameters
+    ----------
+    directory : path
+        Destination folder, created if needed.
+
+    Returns
+    -------
+    Path
+        The OBJ file; it spans 10 m at the mesh ``size`` DEFAULT_SIZE.
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -62,6 +73,33 @@ def copy_model(path, directory, used=None) -> Path:
     For OBJ models that means the ``mtllib`` files and their textures, which
     must sit next to the model or below its folder. Other formats Cosmographia
     reads (3DS, CMOD) are copied alone.
+
+    Parameters
+    ----------
+    path : path
+        Model file.
+    directory : path
+        Folder to copy into (``out/models``).
+    used : set of str, optional
+        Folder names taken by earlier models; updated. A taken stem gets
+        _2, _3, ... appended.
+
+    Returns
+    -------
+    Path
+        The copied model.
+
+    Raises
+    ------
+    FileNotFoundError
+        If *path* is not a file.
+    ValueError
+        If the model references a file by absolute path or outside its folder.
+
+    Warns
+    -----
+    UserWarning
+        For each referenced file that does not exist (it is skipped).
     """
     path = Path(path)
     if not path.is_file():
@@ -98,7 +136,23 @@ def copy_model(path, directory, used=None) -> Path:
 
 
 def _references(path: Path, keys, every_token=False) -> list[Path]:
-    """File names given after *keys* in an OBJ/MTL file."""
+    """File names given after *keys* in an OBJ or MTL file.
+
+    Parameters
+    ----------
+    path : Path
+        OBJ or MTL file.
+    keys : set of str
+        Lower-case statements to look for, e.g. ``{"mtllib"}``.
+    every_token : bool
+        Take every token after the key (``mtllib a.mtl b.mtl``) instead of the
+        last one only (``map_Kd -s 1 1 1 tex.png``).
+
+    Returns
+    -------
+    list of Path
+        Names as written, relative to the file's folder.
+    """
     refs = []
     for line in path.read_text(errors="replace").splitlines():
         tokens = line.split()
@@ -108,31 +162,59 @@ def _references(path: Path, keys, every_token=False) -> list[Path]:
 
 
 def _span(sign, a, b):
+    """Interval (a, b) on the side of zero given by *sign*: (a, b) or (-b, -a)."""
     return (a, b) if sign > 0 else (-b, -a)
 
 
 def _sub(a, b):
+    """Vector difference a - b."""
     return tuple(x - y for x, y in zip(a, b))
 
 
 def _cross(a, b):
+    """Cross product a x b of two 3-vectors."""
     return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
 
 
 def _dot(a, b):
+    """Dot product of two vectors."""
     return sum(x * y for x, y in zip(a, b))
 
 
 class _Mesh:
-    """Triangles with flat normals, grouped by material."""
+    """Triangles with flat normals, grouped by material.
+
+    Attributes
+    ----------
+    vertices : list of tuple
+        Vertex positions, three per triangle.
+    normals : list of tuple
+        Unit normals, one per triangle.
+    faces : dict[str, list of tuple]
+        Per material, the 1-based (vertex, vertex, vertex, normal) indices of
+        each triangle.
+    """
 
     def __init__(self):
+        """Start an empty mesh."""
         self.vertices: list[tuple] = []
         self.normals: list[tuple] = []
         self.faces: dict[str, list[tuple]] = {}
 
     def triangle(self, material, a, b, c, inside):
-        """Add triangle abc, wound so its normal points away from *inside*."""
+        """Add triangle abc, wound so its normal points away from *inside*.
+
+        Degenerate triangles (zero area) are skipped.
+
+        Parameters
+        ----------
+        material : str
+            Material name.
+        a, b, c : tuple of 3 floats
+            Corners.
+        inside : tuple of 3 floats
+            A point on the inner side of the surface.
+        """
         n = _cross(_sub(b, a), _sub(c, a))
         centroid = tuple(sum(p) / 3 for p in zip(a, b, c))
         if _dot(n, _sub(centroid, inside)) < 0:
@@ -146,10 +228,30 @@ class _Mesh:
         self.faces.setdefault(material, []).append((v - 2, v - 1, v, k))
 
     def quad(self, material, a, b, c, d, inside):
+        """Add the planar quadrilateral abcd as two triangles.
+
+        Parameters
+        ----------
+        material : str
+            Material name.
+        a, b, c, d : tuple of 3 floats
+            Corners, in order around the edge.
+        inside : tuple of 3 floats
+            A point on the inner side of the surface.
+        """
         self.triangle(material, a, b, c, inside)
         self.triangle(material, a, c, d, inside)
 
     def box(self, material, xs, ys, zs):
+        """Add an axis-aligned box.
+
+        Parameters
+        ----------
+        material : str
+            Material name.
+        xs, ys, zs : (float, float)
+            Extent along each axis.
+        """
         inside = tuple(sum(r) / 2 for r in (xs, ys, zs))
         (x0, x1), (y0, y1), (z0, z1) = xs, ys, zs
         for x in (x0, x1):
@@ -160,7 +262,21 @@ class _Mesh:
             self.quad(material, (x0, y0, z), (x1, y0, z), (x1, y1, z), (x0, y1, z), inside)
 
     def cylinder(self, material, cap, radius, z0, z1, sides=24):
-        """A barrel along +Z with a *cap* material on its +Z end."""
+        """Add a barrel along +Z with a *cap* material on its +Z end.
+
+        Parameters
+        ----------
+        material : str
+            Material of the side.
+        cap : str
+            Material of the +Z disc (the -Z end is open).
+        radius : float
+            Radius.
+        z0, z1 : float
+            Extent along Z.
+        sides : int
+            Number of facets around.
+        """
         ring = [_polar(radius, k, sides) for k in range(sides + 1)]
         axis_mid = (0.0, 0.0, (z0 + z1) / 2)
         for (xa, ya), (xb, yb) in zip(ring, ring[1:]):
@@ -168,7 +284,19 @@ class _Mesh:
             self.triangle(cap, (0.0, 0.0, z1), (xa, ya, z1), (xb, yb, z1), axis_mid)
 
     def dish(self, material, radius, apex, rim, sides=32):
-        """A shallow cone from *apex* to a rim of *radius* at z = *rim*, closed by a disc."""
+        """Add a shallow cone from *apex* to a rim of *radius* at z = *rim*, closed by a disc.
+
+        Parameters
+        ----------
+        material : str
+            Material name.
+        radius : float
+            Rim radius.
+        apex, rim : float
+            Z of the cone tip and of the rim.
+        sides : int
+            Number of facets around.
+        """
         ring = [_polar(radius, k, sides) for k in range(sides + 1)]
         inside = (0.0, 0.0, rim + 0.25 * (apex - rim))
         for (xa, ya), (xb, yb) in zip(ring, ring[1:]):
@@ -176,6 +304,17 @@ class _Mesh:
             self.triangle(material, (0.0, 0.0, rim), (xa, ya, rim), (xb, yb, rim), inside)
 
     def obj(self, mtllib: str) -> str:
+        """Wavefront OBJ text of the mesh.
+
+        Parameters
+        ----------
+        mtllib : str
+            Material library to reference, relative to the OBJ file.
+
+        Returns
+        -------
+        str
+        """
         lines = [
             "# Generic spacecraft written by cosmo-scb (illustrative, not to scale).",
             "# +Z camera boresight, +/-Y solar wings facing +X, -Z antenna.",
@@ -190,11 +329,18 @@ class _Mesh:
 
 
 def _polar(radius, k, sides):
+    """Point *k* of *sides* equally spaced on a circle of *radius*, as (x, y)."""
     angle = 2 * math.pi * k / sides
     return (radius * math.cos(angle), radius * math.sin(angle))
 
 
 def _mtl() -> str:
+    """MTL text defining the default model's materials.
+
+    Returns
+    -------
+    str
+    """
     lines = ["# Materials for scb_spacecraft.obj"]
     for name, (kd, ks, ns) in _MATERIALS.items():
         lines += [
